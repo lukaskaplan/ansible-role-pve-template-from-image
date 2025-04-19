@@ -1,0 +1,135 @@
+---
+- name: Install pip3, proxmoxer, libguestfs-tools
+  ansible.builtin.apt:
+    name: "{{ apt_package }}"
+    state: present
+  with_items:
+    - python3-pip
+    - python3-proxmoxer
+    - libguestfs-tools
+    - python3-jmespath
+    - python3-lxml
+  loop_control:
+    loop_var: apt_package
+
+- name: Authenticate and get ticket from Proxmox
+  ansible.builtin.uri:
+    url: "https://{{ pve_temlate_from_image_api_host }}/api2/json/access/ticket"
+    method: POST
+    body_format: form-urlencoded
+    body:
+      username: "{{ pve_temlate_from_image_api_user }}"
+      password: "{{ pve_temlate_from_image_api_password }}"
+    validate_certs: false
+  register: login
+
+- name: List Proxmox nodes using the ticket
+  ansible.builtin.uri:
+    url: "https://{{ pve_temlate_from_image_api_host }}/api2/json/nodes"
+    method: GET
+    headers:
+      Cookie: "PVEAuthCookie={{ login.json.data.ticket }}"
+    validate_certs: false
+  register: result
+
+- name: DEBUG - Display node name
+  ansible.builtin.debug:
+    var: result.json.data[0].node
+  when: debug_on
+
+- name: Set node name
+  ansible.builtin.set_fact:
+    node: "{{ result.json.data[0].node }}"
+
+- name: Create base VM for template
+  community.general.proxmox_kvm:
+    api_host: "{{ pve_temlate_from_image_api_host }}"
+    api_user: "{{ pve_temlate_from_image_api_user }}"
+    api_password: "{{ pve_temlate_from_image_api_password }}"
+    # api_token_id: "{{ token_id }}"
+    # api_token_secret: "{{ token_secret }}"
+    node: "{{ node }}"
+    name: "{{ pve_temlate_from_image_template_name }}"
+    net: '{"net0":"virtio,bridge=vmbr0"}'
+    state: present
+  register: basevm
+
+- name: DEBUG - result of base VM creation
+  ansible.builtin.debug:
+    msg: "{{ basevm }}"
+  when: debug_on
+
+### Block
+- name: Create VM template from qcow2 image
+  when: basevm.changed # noqa: no-handler
+  block:
+    - name: Download Debian cloud image
+      ansible.builtin.get_url:
+        url: "{{ pve_temlate_from_image_image_url }}"
+        dest: "/tmp/{{ pve_temlate_from_image_template_name }}.qcow2"
+        mode: "0644"
+
+    - name: Detect OS from QCOW2 image
+      ansible.builtin.command: virt-inspector -a "/tmp/{{ pve_temlate_from_image_template_name }}.qcow2"
+      register: virt_inspect_output
+      changed_when: false
+
+    #  - name: Display OS information
+    #    debug:
+    #      msg: "{{ virt_inspect_output.stdout }}"
+
+    - name: Extract major_version from the XML
+      community.general.xml:
+        xmlstring: "{{ virt_inspect_output.stdout }}"
+        xpath: /operatingsystems/operatingsystem/major_version
+        content: text
+      register: xml_major_version
+
+    #  - name: Configure archive apt sources for old distro
+    #    ansible.builtin.command: "{{ sources_cmd }}"
+    #    with_items:
+    #       - "virt-customize -a your_vm_disk_image.qcow2 --write /etc/apt/sources.list:'deb http://archive.debian.org/debian stretch main contrib non-free
+    # deb-src http://archive.debian.org/debian stretch main contrib non-free
+    # deb http://archive.debian.org/debian-security stretch/updates main contrib non-free
+    # deb-src http://archive.debian.org/debian-security stretch/updates main contrib non-free'"
+    #      - "virt-customize -a /tmp/{{ pve_temlate_from_image_template_name }}.qcow2 --run-command 'apt-get update'"
+    #    loop_control:
+    #      loop_var: sources_cmd
+    #    when: xml_major_version.matches[0].major_version | int < 11
+
+    - name: Configure archive apt sources for old distro  # noqa: no-changed-when
+      ansible.builtin.command: "{{ command }}"
+      vars:
+        commands:
+          - "virt-customize -a /tmp/{{ pve_temlate_from_image_template_name }}.qcow2 --write /etc/apt/sources.list:'deb http://archive.debian.org/debian stretch main contrib non-free\ndeb-src http://archive.debian.org/debian stretch main contrib non-free\ndeb http://archive.debian.org/debian-security stretch/updates main contrib non-free\ndeb-src http://archive.debian.org/debian-security stretch/updates main contrib non-free'"  # noqa: yaml[line-length]
+          - "virt-customize -a /tmp/{{ pve_temlate_from_image_template_name }}.qcow2 --run-command 'apt-get update'"
+          - "virt-customize -a /tmp/{{ pve_temlate_from_image_template_name }}.qcow2 --install cloud-init"
+          - "virt-customize -a /tmp/{{ pve_temlate_from_image_template_name }}.qcow2 --edit '/etc/network/cloud-interfaces-template:s/dhcp/manual/'"
+          - "virt-customize -a /tmp/{{ pve_temlate_from_image_template_name }}.qcow2 --install qemu-guest-agent"
+      loop: "{{ commands }}"
+      loop_control:
+        loop_var: command
+      when: xml_major_version.matches[0].major_version | int < 11
+
+    - name: Import image and create VM template  # noqa: no-changed-when
+      ansible.builtin.command: "{{ qm_cmd }}"
+      with_items:
+        - "virt-customize -a /tmp/{{ pve_temlate_from_image_template_name }}.qcow2 --install qemu-guest-agent"
+        - "virt-customize -a /tmp/{{ pve_temlate_from_image_template_name }}.qcow2 --edit '/etc/network/cloud-interfaces-template:s/dhcp/manual/'"
+        - "qm importdisk {{ basevm.vmid }} /tmp/{{ pve_temlate_from_image_template_name }}.qcow2 {{ pve_temlate_from_image_disk_image_storage }}"
+        # Start VM on boot:
+        - "qm set {{ basevm.vmid }} --onboot 1"
+        - "qm set {{ basevm.vmid }} --scsihw virtio-scsi-pci --scsi0 {{ pve_temlate_from_image_disk_image_storage }}:vm-{{ basevm.vmid }}-disk-0"
+        - "qm set {{ basevm.vmid }} --ide2 {{ pve_temlate_from_image_disk_image_storage }}:cloudinit"
+        - "qm set {{ basevm.vmid }} --boot c --bootdisk scsi0"
+        - "qm set {{ basevm.vmid }} --serial0 socket --vga serial0"
+        - "qm set {{ basevm.vmid }} --agent 1"
+        - "qm template {{ basevm.vmid }}"
+      loop_control:
+        loop_var: qm_cmd
+
+    - name: Delete Debian cloud image from /tmp
+      ansible.builtin.file:
+        path: "/tmp/{{ pve_temlate_from_image_template_name }}.qcow2"
+        state: absent
+  ### /end Block
