@@ -1,18 +1,18 @@
 ---
 # Access to the proxmox API
 # (common admin user used in the web gui):
-pve_temlate_from_image_api_host: "{{ ansible_host }}:8006"
-pve_temlate_from_image_api_user: root@pam
-pve_temlate_from_image_api_password: changeme
+pve_template_from_image_api_host: "{{ ansible_host }}:8006"
+pve_template_from_image_api_user: root@pam
+pve_template_from_image_api_password: changeme
 
 # Name of the VM template
-pve_temlate_from_image_template_name: template
+pve_template_from_image_template_name: template
 
 # enter url of your qcow2 file
-pve_temlate_from_image_image_url: https://cloud.debian.org/images/cloud/bullseye/latest/debian-11-genericcloud-amd64.qcow2
+pve_template_from_image_image_url: https://cloud.debian.org/images/cloud/bullseye/latest/debian-11-genericcloud-amd64.qcow2
 
 # Name of the storage containing disk images of VMs
-pve_temlate_from_image_disk_image_storage: local-zfs
+pve_template_from_image_disk_image_storage: local-zfs
 
 # Turn on/off debug mode
-pve_temlate_from_image_debug_on: false
+pve_template_from_image_debug_on: false
